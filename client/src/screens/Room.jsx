@@ -1,15 +1,19 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useSocket } from "../context/SocketProvider";
-import ReactPlayer from "react-player";
 import peer from "../service/peer";
+
 const RoomPage = () => {
   const socket = useSocket();
   const [remoteSocketId, setRemoteSocketId] = useState(null);
   const [myStream, setMyStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
+  const [trackSenders, setTrackSenders] = useState(new Map());
+
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
 
   const handleUserJoined = useCallback(({ email, id }) => {
-    console.log(`EMail: ${email} joined room`);
+    console.log(`Email: ${email} joined room`);
     setRemoteSocketId(id);
   }, []);
 
@@ -18,9 +22,12 @@ const RoomPage = () => {
       audio: true,
       video: true,
     });
+    setMyStream(stream);
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = stream;
+    }
     const offer = await peer.getOffer();
     socket.emit("user:call", { to: remoteSocketId, offer });
-    setMyStream(stream);
   }, [remoteSocketId, socket]);
 
   const handleIncomingCall = useCallback(
@@ -31,27 +38,43 @@ const RoomPage = () => {
         video: true,
       });
       setMyStream(stream);
-      console.log(`Incoming Call`, from, offer);
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+      console.log(`Incoming Call from ${from}`);
       const ans = await peer.getAnswer(offer);
       socket.emit("call:accepted", { to: from, ans });
     },
     [socket]
   );
 
-  const handleCallAccepted = useCallback(
-    ({ from, ans }) => {
-      peer.setLocalDescription(ans);
-      console.log("Call Accepted!");
+  const sendStreams = useCallback(() => {
+    if (myStream) {
+      const newTrackSenders = new Map(trackSenders);
       for (const track of myStream.getTracks()) {
-        peer.peer.addTrack(track, myStream);
+        if (!newTrackSenders.has(track.id)) {
+          const sender = peer.peer.addTrack(track, myStream);
+          newTrackSenders.set(track.id, sender);
+        }
       }
+      setTrackSenders(newTrackSenders);
+    }
+  }, [myStream, trackSenders]);
+
+  const handleCallAccepted = useCallback(
+    async ({ from, ans }) => {
+      await peer.setLocalDescription(ans);
+      console.log("Call Accepted!");
+      sendStreams();
     },
-    [myStream]
+    [sendStreams]
   );
+
   const handleNegoNeeded = useCallback(async () => {
     const offer = await peer.getOffer();
     socket.emit("peer:nego:needed", { offer, to: remoteSocketId });
-  }, []);
+  }, [remoteSocketId, socket]);
+
   useEffect(() => {
     peer.peer.addEventListener("negotiationneeded", handleNegoNeeded);
 
@@ -61,8 +84,8 @@ const RoomPage = () => {
   }, [handleNegoNeeded]);
 
   const handleNegoNeedIncoming = useCallback(
-    ({ from, offer }) => {
-      const ans = peer.getAnswer(offer);
+    async ({ from, offer }) => {
+      const ans = await peer.getAnswer(offer);
       socket.emit("peer:nego:done", { to: from, ans });
     },
     [socket]
@@ -73,9 +96,13 @@ const RoomPage = () => {
   }, []);
 
   useEffect(() => {
-    peer.peer.addEventListener("track", async (ev) => {
-      const remoteStream = ev.streams;
+    peer.peer.addEventListener("track", (ev) => {
+      const remoteStream = ev.streams[0];
+      console.log("Got Tracks!");
       setRemoteStream(remoteStream);
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remoteStream;
+      }
     });
   }, []);
 
@@ -83,14 +110,14 @@ const RoomPage = () => {
     socket.on("user:joined", handleUserJoined);
     socket.on("incoming:call", handleIncomingCall);
     socket.on("call:accepted", handleCallAccepted);
-    socket.on("peer:peer:needed", handleNegoNeedIncoming);
+    socket.on("peer:nego:needed", handleNegoNeedIncoming);
     socket.on("peer:nego:final", handleNegoNeedFinal);
 
     return () => {
       socket.off("user:joined", handleUserJoined);
       socket.off("incoming:call", handleIncomingCall);
       socket.off("call:accepted", handleCallAccepted);
-      socket.off("peer:peer:needed", handleNegoNeedIncoming);
+      socket.off("peer:nego:needed", handleNegoNeedIncoming);
       socket.off("peer:nego:final", handleNegoNeedFinal);
     };
   }, [
@@ -101,35 +128,28 @@ const RoomPage = () => {
     handleNegoNeedIncoming,
     handleNegoNeedFinal,
   ]);
+
   return (
     <div>
       <h1>Room Page</h1>
       <h4>{remoteSocketId ? "Connected" : "No one in Room"}</h4>
-      {remoteSocketId && <button onClick={handleCallUser}> CALL</button>}
-      {myStream && (
-        <>
-          <h1>My Stream</h1>
-          <ReactPlayer
-            playing
-            muted
-            height="100px"
-            width="200px"
-            url={myStream}
-          />
-        </>
-      )}
-
+      {myStream && <button onClick={sendStreams}>Send Stream</button>}
+      {remoteSocketId && <button onClick={handleCallUser}>Call</button>}
+      <div>
+        <h1>My Stream</h1>
+        <video
+          autoPlay
+          muted
+          height="100px"
+          width="200px"
+          ref={localVideoRef}
+        />
+      </div>
       {remoteStream && (
-        <>
+        <div>
           <h1>Remote Stream</h1>
-          <ReactPlayer
-            playing
-            muted
-            height="100px"
-            width="200px"
-            url={remoteStream}
-          />
-        </>
+          <video autoPlay height="100px" width="200px" ref={remoteVideoRef} />
+        </div>
       )}
     </div>
   );
